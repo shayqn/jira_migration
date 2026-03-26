@@ -1,0 +1,17 @@
+# Credentials / local config — never commit these
+config.yaml
+.env
+
+# User mapping may contain PII — keep local
+user_mapping.csv
+
+# Output CSVs
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+atlassian/

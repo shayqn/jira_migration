@@ -1,0 +1,2 @@
+requests>=2.31.0
+pyyaml>=6.0       # only required if you use config.yaml; not needed for env-var-only usage

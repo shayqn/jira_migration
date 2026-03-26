@@ -1,0 +1,34 @@
+# config.yaml.example
+#
+# Copy this file to config.yaml and fill in your values.
+# Environment variables take precedence over values set here.
+#
+# IMPORTANT: Do not commit config.yaml to version control.
+# Add it to .gitignore.
+
+jira_a:
+  base_url: https://your-source.atlassian.net
+  email: you@source.com
+  api_token: YOUR_API_TOKEN_HERE
+
+# Only needed for Strategy B (direct REST import into Workspace B).
+# Leave commented out until then.
+# jira_b:
+#   base_url: https://your-destination.atlassian.net
+#   email: you@destination.com
+#   api_token: YOUR_API_TOKEN_HERE
+
+migration:
+  # How to preserve unmapped-user identities.
+  # Options: extra_columns | append_description | both
+  legacy_info_strategy: extra_columns
+
+  # What to put in ReporterEmail / AssigneeEmail for unmapped users.
+  # Leave as "" to keep the column blank, or set a catch-all address.
+  unmapped_user_placeholder: ""
+
+  # Directory (relative to this script, or absolute) for output CSVs.
+  output_dir: output
+
+  # Issues per API page (Jira Cloud max is 100).
+  page_size: 100

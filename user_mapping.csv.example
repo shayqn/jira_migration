@@ -1,0 +1,4 @@
+source_email,target_email
+alice@oldco.com,alice@newco.com
+bob@oldco.com,bob@newco.com
+carol@oldco.com,carol@newco.com
