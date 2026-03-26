@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Any, Dict, Generator, List
+from typing import Any, Dict, Generator, List, Optional
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -47,6 +47,37 @@ def _make_auth(site: SiteConfig) -> HTTPBasicAuth:
 
 def _make_headers() -> Dict[str, str]:
     return {"Accept": "application/json", "Content-Type": "application/json"}
+
+
+def _get_json(url: str, params: Dict[str, Any], auth: HTTPBasicAuth, retries: int = 3) -> Any:
+    """GET a URL with simple retry logic for transient 429/5xx errors."""
+    headers = _make_headers()
+    for attempt in range(1, retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=headers, auth=auth, timeout=30)
+        except requests.RequestException as exc:
+            if attempt == retries:
+                raise
+            time.sleep(2 ** attempt)
+            continue
+
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 10))
+            print(f"[extract] Rate limited – waiting {retry_after}s …", file=sys.stderr)
+            time.sleep(retry_after)
+            continue
+
+        if not resp.ok:
+            try:
+                detail = resp.json()
+            except Exception:
+                detail = resp.text
+            print(f"[extract] HTTP {resp.status_code} error body: {detail}", file=sys.stderr)
+            resp.raise_for_status()
+
+        return resp.json()
+
+    raise RuntimeError(f"Failed to GET {url} after {retries} retries.")
 
 
 def _post_json(url: str, body: Dict[str, Any], auth: HTTPBasicAuth, retries: int = 3) -> Any:
@@ -166,3 +197,64 @@ def fetch_all_issues(
 
     print(f"[extract] Done – {len(all_issues)} issues fetched.")
     return all_issues
+
+
+def fetch_comments(
+    site: SiteConfig,
+    issue_key: str,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all comments for a single issue, handling pagination.
+
+    Returns a list of raw Jira comment dicts from the 'comments' array,
+    each containing at minimum: id, author, body (ADF), created, updated.
+    """
+    url = f"{site.base_url}/rest/api/3/issue/{issue_key}/comment"
+    auth = _make_auth(site)
+    all_comments: List[Dict[str, Any]] = []
+    start_at = 0
+    page_size = 100
+
+    while True:
+        data = _get_json(url, {"startAt": start_at, "maxResults": page_size}, auth)
+        comments: List[Dict[str, Any]] = data.get("comments", [])
+        total: int = data.get("total", 0)
+
+        all_comments.extend(comments)
+        start_at += len(comments)
+
+        if not comments or start_at >= total:
+            break
+
+    return all_comments
+
+
+def fetch_comments_for_issues(
+    site: SiteConfig,
+    issues: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Fetch comments for every issue in *issues* and return a dict of
+    {issue_key: [comment, ...]} for issues that have at least one comment.
+
+    Skips issues with zero comments to avoid unnecessary API calls.
+    """
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    issues_with_comments = [
+        i for i in issues
+        if (i.get("fields") or {}).get("comment", {}).get("total", 1) != 0
+    ]
+    total = len(issues)
+    print(f"[extract] Fetching comments for {total} issues …")
+
+    for idx, issue in enumerate(issues, start=1):
+        key = issue.get("key", "")
+        comments = fetch_comments(site, key)
+        if comments:
+            result[key] = comments
+        if idx % 50 == 0 or idx == total:
+            print(f"[extract]   {idx}/{total} issues processed for comments")
+
+    total_comments = sum(len(v) for v in result.values())
+    print(f"[extract] Done – {total_comments} comments fetched across {len(result)} issues.")
+    return result
