@@ -32,3 +32,14 @@ migration:
 
   # Issues per API page (Jira Cloud max is 100).
   page_size: 100
+
+  # Strategy B: map issue type names from Workspace A → Workspace B.
+  # Only needed when the two sites use different type names.
+  # Types not listed here are matched case-insensitively; unmatched types
+  # fall back to fallback_issue_type.
+  # issue_type_map:
+  #   Story: Task
+  #   Epic: Epic
+
+  # Strategy B: issue type to use when no match is found in Workspace B.
+  fallback_issue_type: Task

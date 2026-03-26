@@ -6,10 +6,12 @@ transformation logic (extract.py, transform_rest.py) is reused unchanged.
 
 Key responsibilities:
   1. Resolve mapped emails → accountIds in Workspace B (cached).
-  2. Create issues via POST /rest/api/3/issue, in parent-before-subtask order.
-  3. Resolve subtask parent keys (source key → dest key) before creating them.
-  4. Post comments via POST /rest/api/3/issue/{key}/comment.
-  5. Log a clear summary and skip (not abort) on per-issue errors.
+  2. Validate destination issue types; apply issue_type_map + fallback.
+  3. Create issues via POST /rest/api/3/issue, in parent-before-subtask order.
+  4. Resolve subtask parent keys (source key → dest key) before creating them.
+  5. Transition each issue to its source status via POST /rest/api/3/issue/{key}/transitions.
+  6. Post comments via POST /rest/api/3/issue/{key}/comment.
+  7. Log a clear summary and skip (not abort) on per-issue errors.
 
 Usage:
   from write_rest import write_issues_rest
@@ -25,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from requests.auth import HTTPBasicAuth
 
-from config import SiteConfig
+from config import SiteConfig, MigrationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +169,8 @@ def _build_issue_payload(
     dest_project_key: str,
     key_map: Dict[str, str],
     resolver: UserResolver,
+    available_types: Dict[str, str],
+    cfg: MigrationConfig,
 ) -> Dict[str, Any]:
     """
     Build the final POST /rest/api/3/issue payload for *item*.
@@ -178,6 +182,10 @@ def _build_issue_payload(
 
     # Inject destination project.
     fields["project"] = {"key": dest_project_key}
+
+    # Resolve issue type to one that exists in Workspace B.
+    source_type = (fields.get("issuetype") or {}).get("name") or "Task"
+    fields["issuetype"] = {"name": _resolve_issue_type(source_type, available_types, cfg)}
 
     # Resolve parent key for subtasks.
     source_parent = fields.pop("_source_parent_key", None)
@@ -211,9 +219,80 @@ def _post_comment(site: SiteConfig, dest_key: str, comment: Dict[str, Any]) -> N
     _request("POST", url, site, json={"body": comment["body"]})
 
 
+def _apply_transition(site: SiteConfig, dest_key: str, target_status: str) -> bool:
+    """
+    Transition *dest_key* to *target_status* by name (case-insensitive).
+
+    Fetches the available transitions for the issue and executes the first one
+    whose destination status name matches. Returns True if transitioned, False
+    if no matching transition was found (e.g. the workflow in Workspace B doesn't
+    have that status, or the issue is already there).
+    """
+    if not target_status:
+        return False
+
+    url = f"{site.base_url}/rest/api/3/issue/{dest_key}/transitions"
+    data = _request("GET", url, site)
+    target_lower = target_status.lower()
+
+    for t in data.get("transitions", []):
+        to_status = (t.get("to") or {}).get("name") or ""
+        if to_status.lower() == target_lower:
+            _request("POST", url, site, json={"transition": {"id": t["id"]}})
+            return True
+
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
+
+def _fetch_project_issue_types(site: SiteConfig, project_key: str) -> Dict[str, Any]:
+    """
+    Return a dict of {type_name_lower: type_name_original} for all issue types
+    available in the destination project.
+    """
+    url = f"{site.base_url}/rest/api/3/project/{project_key}"
+    data = _request("GET", url, site)
+    types: Dict[str, str] = {}
+    for it in data.get("issueTypes") or []:
+        name = it.get("name") or ""
+        types[name.lower()] = name
+    return types
+
+
+def _resolve_issue_type(
+    source_type: str,
+    available_types: Dict[str, str],
+    cfg: MigrationConfig,
+) -> str:
+    """
+    Resolve a source issue-type name to one that exists in Workspace B.
+
+    Resolution order:
+      1. Explicit mapping in cfg.issue_type_map
+      2. Exact match (case-insensitive) in available_types
+      3. cfg.fallback_issue_type
+    """
+    # 1. Explicit override
+    mapped = cfg.issue_type_map.get(source_type) or cfg.issue_type_map.get(source_type.lower())
+    if mapped:
+        return mapped
+
+    # 2. Case-insensitive match
+    original = available_types.get(source_type.lower())
+    if original:
+        return original
+
+    # 3. Fallback
+    print(
+        f"[write_rest] Warning: issue type '{source_type}' not found in Workspace B; "
+        f"falling back to '{cfg.fallback_issue_type}'.",
+        file=sys.stderr,
+    )
+    return cfg.fallback_issue_type
+
 
 def _verify_project(site: SiteConfig, project_key: str) -> None:
     """
@@ -248,6 +327,7 @@ def write_issues_rest(
     transformed_issues: List[Dict[str, Any]],
     site_b: SiteConfig,
     dest_project_key: str,
+    cfg: Optional[MigrationConfig] = None,
 ) -> Tuple[int, int, int]:
     """
     Create all issues and comments in Workspace B.
@@ -260,12 +340,20 @@ def write_issues_rest(
     Returns:
       (issues_created, comments_posted, errors) counts.
     """
+    from config import MigrationConfig as _MC
+    if cfg is None:
+        cfg = _MC(jira_a=site_b, jira_b=None)  # minimal fallback; callers should always pass cfg
+
     _verify_project(site_b, dest_project_key)
+    available_types = _fetch_project_issue_types(site_b, dest_project_key)
+    print(f"[write_rest] Issue types available in '{dest_project_key}': "
+          f"{', '.join(sorted(available_types.values()))}")
 
     resolver = UserResolver(site_b)
     key_map: Dict[str, str] = {}   # source_key → dest_key
     issues_created = 0
     comments_posted = 0
+    transitions_applied = 0
     errors = 0
 
     total = len(transformed_issues)
@@ -275,11 +363,23 @@ def write_issues_rest(
     for idx, item in enumerate(transformed_issues, start=1):
         source_key = item["source_key"]
         try:
-            payload = _build_issue_payload(item, dest_project_key, key_map, resolver)
+            payload = _build_issue_payload(item, dest_project_key, key_map, resolver, available_types, cfg)
             dest_key = _create_issue(site_b, payload)
             key_map[source_key] = dest_key
             issues_created += 1
-            print(f"[write_rest]   [{idx}/{total}] {source_key} → {dest_key}")
+
+            # Transition to source status.
+            source_status = item.get("source_status", "")
+            if source_status:
+                transitioned = _apply_transition(site_b, dest_key, source_status)
+                if transitioned:
+                    transitions_applied += 1
+                else:
+                    print(f"[write_rest]     Note: no transition to '{source_status}' "
+                          f"found for {dest_key} — left in default status.")
+
+            print(f"[write_rest]   [{idx}/{total}] {source_key} → {dest_key} "
+                  f"(status: {source_status or 'default'})")
         except Exception as exc:
             print(
                 f"[write_rest]   [{idx}/{total}] ERROR creating '{source_key}': {exc}",
@@ -303,6 +403,7 @@ def write_issues_rest(
     print(
         f"\n[write_rest] Done.  "
         f"{issues_created} issues created, "
+        f"{transitions_applied} statuses applied, "
         f"{comments_posted} comments posted, "
         f"{errors} error(s)."
     )

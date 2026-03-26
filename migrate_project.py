@@ -159,7 +159,7 @@ def main() -> None:
         transformed = transform_issues_rest(raw_issues, comments_by_key, mapping, cfg)
 
         issues_created, comments_posted, errors = write_issues_rest(
-            transformed, cfg.jira_b, dest_project_key
+            transformed, cfg.jira_b, dest_project_key, cfg
         )
 
         if errors:

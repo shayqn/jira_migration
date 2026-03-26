@@ -161,6 +161,7 @@ def transform_issue_rest(
 
     source_key: str = issue.get("key") or ""
     summary: str = fields.get("summary") or ""
+    source_status: str = (fields.get("status") or {}).get("name") or ""
 
     issuetype_obj = fields.get("issuetype") or {}
     issuetype_name: str = issuetype_obj.get("name") or "Task"
@@ -226,6 +227,7 @@ def transform_issue_rest(
     return {
         "source_key": source_key,
         "source_parent_key": source_parent_key,
+        "source_status": source_status,
         "is_subtask": is_subtask,
         "fields": fields_payload,
         "legacy_reporter": reporter_legacy if strategy in ("extra_columns", "both") else "",
