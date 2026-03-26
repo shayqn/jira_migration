@@ -212,6 +212,35 @@ def _post_comment(site: SiteConfig, dest_key: str, comment: Dict[str, Any]) -> N
 
 
 # ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+
+def _verify_project(site: SiteConfig, project_key: str) -> None:
+    """
+    Confirm the destination project exists and is accessible.
+    Raises SystemExit with a clear message if it doesn't.
+    """
+    url = f"{site.base_url}/rest/api/3/project/{project_key}"
+    try:
+        _request("GET", url, site)
+        print(f"[write_rest] Verified destination project '{project_key}' exists.")
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "?"
+        if status in (400, 404):
+            print(
+                f"\n[write_rest] ERROR: Project '{project_key}' was not found in {site.base_url}.\n"
+                f"  Create the project in Workspace B first, then re-run.\n",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"\n[write_rest] ERROR: Could not verify project '{project_key}': {exc}\n",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Main writer
 # ---------------------------------------------------------------------------
 
@@ -231,6 +260,8 @@ def write_issues_rest(
     Returns:
       (issues_created, comments_posted, errors) counts.
     """
+    _verify_project(site_b, dest_project_key)
+
     resolver = UserResolver(site_b)
     key_map: Dict[str, str] = {}   # source_key → dest_key
     issues_created = 0
