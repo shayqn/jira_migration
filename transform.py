@@ -37,6 +37,8 @@ CSV_COLUMNS = [
     "Labels",
     "Components",
     "ParentKey",
+    "DueDate",
+    "StartDate",
 ]
 
 
@@ -108,6 +110,9 @@ def transform_issue(
     # -- Parent key (sub-tasks) ----------------------------------------------
     parent_obj = fields.get("parent")
     parent_key: str = parent_obj.get("key", "") if isinstance(parent_obj, dict) else ""
+
+    due_date: str = fields.get("duedate") or ""
+    start_date: str = fields.get(cfg.start_date_field) or ""
 
     # -- User mapping --------------------------------------------------------
     # Jira Cloud often omits emailAddress due to visibility settings.
@@ -184,6 +189,8 @@ def transform_issue(
         "Labels": labels,
         "Components": components,
         "ParentKey": parent_key,
+        "DueDate": due_date,
+        "StartDate": start_date,
     }
 
 

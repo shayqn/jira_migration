@@ -65,6 +65,10 @@ class MigrationConfig:
     # in Workspace B and has no entry in issue_type_map.
     fallback_issue_type: str = "Task"
 
+    # The Jira custom field ID used for "Start date" in Workspace A.
+    # Most Jira Cloud projects use customfield_10015; change if yours differs.
+    start_date_field: str = "customfield_10015"
+
 
 def _require(value: Optional[str], name: str) -> str:
     if not value:
@@ -149,5 +153,8 @@ def load_config() -> MigrationConfig:
         issue_type_map=issue_type_map,
         fallback_issue_type=_get(
             "FALLBACK_ISSUE_TYPE", "migration", "fallback_issue_type", default="Task"
+        ),
+        start_date_field=_get(
+            "START_DATE_FIELD", "migration", "start_date_field", default="customfield_10015"
         ),
     )

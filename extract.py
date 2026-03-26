@@ -38,6 +38,8 @@ REQUESTED_FIELDS = [
     "labels",
     "components",
     "parent",       # sub-task parent link
+    "duedate",
+    "customfield_10015",  # Start date (most Jira Cloud projects)
 ]
 
 

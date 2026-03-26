@@ -200,11 +200,20 @@ def transform_issue_rest(
     if not isinstance(description, dict):
         description = None
 
-    strategy = cfg.legacy_info_strategy
-    has_legacy = bool(reporter_legacy or assignee_legacy)
+    # Prepend source issue key so it's always visible in Workspace B.
+    description = _prepend_to_doc(description, _italic_paragraph(f"Migrated from: {source_key}"))
 
-    if has_legacy and strategy in ("append_description", "both"):
+    # For Strategy B (REST) there are no "extra columns" — the only way to
+    # preserve unmapped-user identity is in the description.  Always append
+    # the legacy block when there are unmapped users, regardless of
+    # legacy_info_strategy.
+    has_legacy = bool(reporter_legacy or assignee_legacy)
+    if has_legacy:
         description = _append_legacy_block_adf(description, reporter_legacy, assignee_legacy)
+
+    # -- Date fields ---------------------------------------------------------
+    due_date: Any = fields.get("duedate") or None
+    start_date: Any = fields.get(cfg.start_date_field) or None
 
     # -- Fields payload ------------------------------------------------------
     fields_payload: Dict[str, Any] = {
@@ -214,6 +223,10 @@ def transform_issue_rest(
         "labels": labels,
         "components": components,
     }
+    if due_date:
+        fields_payload["duedate"] = due_date
+    if start_date:
+        fields_payload[cfg.start_date_field] = start_date
     if priority:
         fields_payload["priority"] = priority
     if reporter_email:
@@ -230,8 +243,8 @@ def transform_issue_rest(
         "source_status": source_status,
         "is_subtask": is_subtask,
         "fields": fields_payload,
-        "legacy_reporter": reporter_legacy if strategy in ("extra_columns", "both") else "",
-        "legacy_assignee": assignee_legacy if strategy in ("extra_columns", "both") else "",
+        "legacy_reporter": reporter_legacy,
+        "legacy_assignee": assignee_legacy,
         "comments": [_transform_comment(c) for c in comments],
     }
 
