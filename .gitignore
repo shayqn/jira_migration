@@ -8,6 +8,9 @@ user_mapping.csv
 # Output CSVs
 output/
 
+# macOS
+.DS_Store
+
 # Python
 __pycache__/
 *.py[cod]
