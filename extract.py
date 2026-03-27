@@ -201,6 +201,67 @@ def fetch_all_issues(
     return all_issues
 
 
+def _collect_user_objects(issues: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Return a dict of {accountId: [user_object, ...]} for every reporter/assignee
+    across all issues whose emailAddress is missing from the issue payload.
+
+    Each issue has its own user object instance in memory, so we collect ALL
+    of them per accountId so every occurrence gets patched, not just the last.
+    """
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for issue in issues:
+        fields = issue.get("fields") or {}
+        for field_name in ("reporter", "assignee"):
+            obj = fields.get(field_name)
+            if not isinstance(obj, dict):
+                continue
+            account_id = obj.get("accountId")
+            if account_id and not obj.get("emailAddress"):
+                result.setdefault(account_id, []).append(obj)
+    return result
+
+
+def supplement_user_emails(
+    site: SiteConfig,
+    issues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Jira Cloud often omits emailAddress from user objects in issue fields due
+    to workspace privacy settings.  This function looks up each missing email
+    via GET /rest/api/3/user?accountId=... and patches it directly into
+    every issue dict that references that user.
+
+    Returns the same list (mutated in place) for convenience.
+    """
+    missing: Dict[str, List[Dict[str, Any]]] = _collect_user_objects(issues)
+    if not missing:
+        print("[extract] All user emailAddresses present — no supplemental lookups needed.")
+        return issues
+
+    print(f"[extract] Supplementing emails for {len(missing)} user(s) missing emailAddress …")
+    auth = _make_auth(site)
+    found = 0
+
+    for account_id, user_objs in missing.items():
+        url = f"{site.base_url}/rest/api/3/user"
+        try:
+            data = _get_json(url, {"accountId": account_id}, auth)
+            email = data.get("emailAddress")
+            if email:
+                for user_obj in user_objs:  # patch every issue that references this user
+                    user_obj["emailAddress"] = email
+                found += 1
+        except Exception as exc:
+            print(
+                f"[extract]   Warning: could not fetch user {account_id}: {exc}",
+                file=sys.stderr,
+            )
+
+    print(f"[extract] Supplemental lookup complete: {found}/{len(missing)} emails resolved.")
+    return issues
+
+
 def fetch_comments(
     site: SiteConfig,
     issue_key: str,

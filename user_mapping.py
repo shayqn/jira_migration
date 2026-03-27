@@ -2,14 +2,20 @@
 user_mapping.py – Load the user mapping CSV and expose a lookup dict.
 
 CSV format (with header row):
-  source_email,target_email
-  alice@oldco.com,alice@newco.com
-  bob@oldco.com,bob@newco.com
+  source_email,source_account_id,target_email
+  alice@oldco.com,712020:abc123,alice@newco.com
+  bob@oldco.com,,bob@newco.com        ← source_account_id is optional
+
+Both source_email and source_account_id (Jira accountId) are indexed in the
+returned dict so callers can look up by whichever identifier is available.
+Jira Cloud often hides emailAddress in API responses, so accountId is the
+reliable fallback.
 
 Usage:
   from user_mapping import load_user_mapping
   mapping = load_user_mapping("user_mapping.csv")
-  target = mapping.get("alice@oldco.com")  # → "alice@newco.com"
+  target = mapping.get("alice@oldco.com")        # look up by email
+  target = mapping.get("712020:abc123")           # look up by accountId
 """
 
 from __future__ import annotations
@@ -21,12 +27,13 @@ from typing import Dict, Optional
 
 def load_user_mapping(path: str | Path) -> Dict[str, str]:
     """
-    Load a user-mapping CSV and return {source_email: target_email}.
+    Load a user-mapping CSV and return a dict keyed by both source_email and
+    source_account_id so callers can look up by whichever is available.
 
-    - The file must have a header row with at least the columns
-      'source_email' and 'target_email' (case-insensitive).
-    - Blank lines and lines where both columns are empty are skipped.
-    - Duplicate source emails: last row wins (with a warning printed).
+    - The file must have 'source_email' and 'target_email' columns (case-insensitive).
+    - 'source_account_id' is optional; rows without it are still loaded by email.
+    - Blank lines and rows with no source identifier are skipped.
+    - Duplicate keys: last row wins (with a warning printed).
     - If the file does not exist, returns an empty dict and prints a warning.
     """
     mapping: Dict[str, str] = {}
@@ -42,7 +49,6 @@ def load_user_mapping(path: str | Path) -> Dict[str, str]:
     with file_path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
 
-        # Normalize header names to lowercase for robustness.
         if reader.fieldnames is None:
             print(f"[user_mapping] Warning: '{file_path}' appears to be empty.")
             return mapping
@@ -55,22 +61,27 @@ def load_user_mapping(path: str | Path) -> Dict[str, str]:
             )
 
         for row in reader:
-            # Re-key using lowercase field names for safety.
             row_lower = {k.strip().lower(): v.strip() for k, v in row.items()}
-            src = row_lower.get("source_email", "")
-            tgt = row_lower.get("target_email", "")
+            src_email      = row_lower.get("source_email", "")
+            src_account_id = row_lower.get("source_account_id", "")
+            tgt            = row_lower.get("target_email", "")
 
-            if not src:
-                continue  # skip rows with no source
+            if not src_email and not src_account_id:
+                continue  # skip empty rows
 
-            if src in mapping:
-                print(
-                    f"[user_mapping] Warning: duplicate source_email '{src}' – "
-                    "last entry wins."
-                )
-            mapping[src] = tgt
+            if src_email:
+                if src_email in mapping:
+                    print(f"[user_mapping] Warning: duplicate source_email '{src_email}' – last entry wins.")
+                mapping[src_email] = tgt
 
-    print(f"[user_mapping] Loaded {len(mapping)} user mapping(s) from '{file_path}'.")
+            if src_account_id:
+                if src_account_id in mapping:
+                    print(f"[user_mapping] Warning: duplicate source_account_id '{src_account_id}' – last entry wins.")
+                mapping[src_account_id] = tgt
+
+    emails = sum(1 for k in mapping if "@" in k)
+    ids    = len(mapping) - emails
+    print(f"[user_mapping] Loaded {emails} email + {ids} accountId mapping(s) from '{file_path}'.")
     return mapping
 
 

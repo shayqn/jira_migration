@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional
 
 from adf_utils import adf_to_text
 from config import MigrationConfig
-from user_mapping import resolve_user
 
 # Ordered list of CSV column names.  write_csv.py uses this as the header.
 CSV_COLUMNS = [
@@ -121,38 +120,36 @@ def transform_issue(
     # identifier when email isn't available.
 
     def _user_email(obj: Any) -> Optional[str]:
-        """Return emailAddress if present, else None."""
         if not isinstance(obj, dict):
             return None
         return obj.get("emailAddress") or None
 
+    def _user_account_id(obj: Any) -> Optional[str]:
+        if not isinstance(obj, dict):
+            return None
+        return obj.get("accountId") or None
+
     def _user_legacy_id(obj: Any) -> str:
-        """Return the best human-readable identifier for an unmapped user."""
         if not isinstance(obj, dict):
             return ""
-        email = obj.get("emailAddress") or ""
-        display = obj.get("displayName") or ""
-        account = obj.get("accountId") or ""
-        if email:
-            return email
-        return display or account
+        return obj.get("emailAddress") or obj.get("displayName") or obj.get("accountId") or ""
+
+    def _resolve(obj: Any):
+        """Try email lookup first, then accountId fallback."""
+        email      = _user_email(obj)
+        account_id = _user_account_id(obj)
+        if email and email in mapping:
+            return mapping[email], ""
+        if account_id and account_id in mapping:
+            return mapping[account_id], ""
+        legacy = _user_legacy_id(obj)
+        return cfg.unmapped_user_placeholder, legacy
 
     reporter_obj = fields.get("reporter")
     assignee_obj = fields.get("assignee")
 
-    reporter_email, reporter_legacy = resolve_user(
-        _user_email(reporter_obj), mapping, cfg.unmapped_user_placeholder
-    )
-    assignee_email, assignee_legacy = resolve_user(
-        _user_email(assignee_obj), mapping, cfg.unmapped_user_placeholder
-    )
-
-    # If a user was unmapped and we have no email, fall back to displayName/accountId
-    # so the legacy columns are never silently empty for real users.
-    if not reporter_legacy and reporter_obj and not _user_email(reporter_obj):
-        reporter_legacy = _user_legacy_id(reporter_obj)
-    if not assignee_legacy and assignee_obj and not _user_email(assignee_obj):
-        assignee_legacy = _user_legacy_id(assignee_obj)
+    reporter_email, reporter_legacy = _resolve(reporter_obj)
+    assignee_email, assignee_legacy = _resolve(assignee_obj)
 
     # -- Description ---------------------------------------------------------
     description: str = _extract_description(issue)

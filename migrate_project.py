@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config import load_config, MigrationConfig
 from user_mapping import load_user_mapping
-from extract import fetch_all_issues, fetch_comments_for_issues
+from extract import fetch_all_issues, fetch_comments_for_issues, supplement_user_emails
 from transform import transform_issues
 from write_csv import write_issues_csv
 from transform_rest import transform_issues_rest
@@ -139,6 +139,12 @@ def main() -> None:
     if not raw_issues:
         print(f"[main] No issues found for project '{project_key}'. Nothing to migrate.")
         sys.exit(0)
+
+    # --- Supplement missing user emails -------------------------------------
+    # Jira Cloud often omits emailAddress from user objects in search results.
+    # Look up each missing email via the single-user endpoint so the user
+    # mapping can match on email address.
+    supplement_user_emails(cfg.jira_a, raw_issues)
 
     # --- Strategy A: CSV ----------------------------------------------------
     if strategy == "csv":

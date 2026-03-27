@@ -43,7 +43,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from config import MigrationConfig
-from user_mapping import resolve_user
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +62,44 @@ def _italic_paragraph(text: str) -> Dict[str, Any]:
 
 def _rule_node() -> Dict[str, Any]:
     return {"type": "rule"}
+
+
+# ADF node types that reference workspace-specific attachment IDs.
+# Posting these to a different workspace always fails with ATTACHMENT_VALIDATION_ERROR.
+_MEDIA_BLOCK_TYPES = {"mediaSingle", "mediaGroup"}
+_MEDIA_INLINE_TYPES = {"mediaInline", "media"}
+
+
+def _sanitize_adf(node: Any) -> Any:
+    """
+    Recursively walk an ADF node and replace media/attachment nodes with
+    text placeholders.
+
+    Jira Cloud attachment IDs are workspace-specific — any ADF that embeds
+    them will be rejected (400 ATTACHMENT_VALIDATION_ERROR) when posted to a
+    different workspace.  We replace them with a visible note rather than
+    silently dropping them.
+    """
+    if not isinstance(node, dict):
+        return node
+
+    node_type = node.get("type", "")
+
+    # Block-level media (images, file previews) → italic placeholder paragraph
+    if node_type in _MEDIA_BLOCK_TYPES:
+        return _italic_paragraph("[Attachment not migrated]")
+
+    # Inline media reference → plain text node
+    if node_type in _MEDIA_INLINE_TYPES:
+        return {"type": "text", "text": "[attachment]"}
+
+    # Recurse into content array, filtering out any None results
+    content = node.get("content")
+    if content:
+        sanitized = [_sanitize_adf(child) for child in content if child is not None]
+        return {**node, "content": sanitized}
+
+    return node
 
 
 def _prepend_to_doc(doc: Any, *prepend_nodes: Dict[str, Any]) -> Dict[str, Any]:
@@ -97,10 +134,44 @@ def _user_email(obj: Any) -> Optional[str]:
     return obj.get("emailAddress") or None
 
 
+def _user_account_id(obj: Any) -> Optional[str]:
+    if not isinstance(obj, dict):
+        return None
+    return obj.get("accountId") or None
+
+
 def _user_legacy_id(obj: Any) -> str:
     if not isinstance(obj, dict):
         return ""
     return obj.get("emailAddress") or obj.get("displayName") or obj.get("accountId") or ""
+
+
+def _resolve_user(
+    user_obj: Any,
+    mapping: Dict[str, str],
+    placeholder: str,
+) -> tuple:
+    """
+    Resolve a Jira user object to (target_email, legacy_identity).
+
+    Tries source email first, then accountId as a fallback — Jira Cloud often
+    omits emailAddress from API responses due to privacy settings.
+    Legacy identity is always the human-readable display name, never an accountId.
+    """
+    email      = _user_email(user_obj)
+    account_id = _user_account_id(user_obj)
+
+    # Email lookup
+    if email and email in mapping:
+        return mapping[email], ""
+
+    # accountId fallback
+    if account_id and account_id in mapping:
+        return mapping[account_id], ""
+
+    # Not mapped — return placeholder and best human-readable identity
+    legacy = _user_legacy_id(user_obj)
+    return placeholder, legacy
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +208,7 @@ def _transform_comment(comment: Dict[str, Any]) -> Dict[str, Any]:
             ]}],
         }
 
+    raw_body = _sanitize_adf(raw_body)
     body_with_header = _prepend_to_doc(raw_body, _italic_paragraph(header_text))
 
     return {
@@ -183,22 +255,15 @@ def transform_issue_rest(
     reporter_obj = fields.get("reporter")
     assignee_obj = fields.get("assignee")
 
-    reporter_email, reporter_legacy = resolve_user(
-        _user_email(reporter_obj), mapping, cfg.unmapped_user_placeholder
-    )
-    assignee_email, assignee_legacy = resolve_user(
-        _user_email(assignee_obj), mapping, cfg.unmapped_user_placeholder
-    )
-
-    if not reporter_legacy and reporter_obj and not _user_email(reporter_obj):
-        reporter_legacy = _user_legacy_id(reporter_obj)
-    if not assignee_legacy and assignee_obj and not _user_email(assignee_obj):
-        assignee_legacy = _user_legacy_id(assignee_obj)
+    reporter_email, reporter_legacy = _resolve_user(reporter_obj, mapping, cfg.unmapped_user_placeholder)
+    assignee_email, assignee_legacy = _resolve_user(assignee_obj, mapping, cfg.unmapped_user_placeholder)
 
     # -- Description (ADF passthrough) ---------------------------------------
     description: Any = fields.get("description")
     if not isinstance(description, dict):
         description = None
+    if description is not None:
+        description = _sanitize_adf(description)
 
     # Prepend source issue key so it's always visible in Workspace B.
     description = _prepend_to_doc(description, _italic_paragraph(f"Migrated from: {source_key}"))
@@ -249,6 +314,59 @@ def transform_issue_rest(
     }
 
 
+def _topological_sort(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Sort issues so every parent is ordered before its children, at any depth.
+
+    Uses Kahn's algorithm (BFS).  Issues whose parent is not in the migrated
+    set (e.g. the parent belongs to a different project) are treated as roots.
+    Relative order among siblings is preserved from the input list.
+
+    If a cycle is detected (shouldn't occur in valid Jira data) the remaining
+    issues are appended at the end with a warning rather than crashing.
+    """
+    by_key: Dict[str, Dict[str, Any]] = {item["source_key"]: item for item in issues}
+
+    # Build children map and in-degree count based on parent_key relationships
+    # that are within this migration batch.
+    children: Dict[str, List[str]] = {key: [] for key in by_key}
+    in_degree: Dict[str, int] = {key: 0 for key in by_key}
+
+    for item in issues:
+        parent_key = item.get("source_parent_key")
+        if parent_key and parent_key in by_key:
+            children[parent_key].append(item["source_key"])
+            in_degree[item["source_key"]] += 1
+
+    # Seed the queue with roots (issues with no parent in this batch),
+    # preserving the original relative order.
+    queue: List[str] = [
+        item["source_key"] for item in issues
+        if in_degree[item["source_key"]] == 0
+    ]
+
+    ordered: List[Dict[str, Any]] = []
+    while queue:
+        key = queue.pop(0)
+        ordered.append(by_key[key])
+        for child_key in children[key]:
+            in_degree[child_key] -= 1
+            if in_degree[child_key] == 0:
+                queue.append(child_key)
+
+    # Cycle guard — append any remaining issues that never reached in_degree 0.
+    remaining = [by_key[k] for k in by_key if in_degree[k] > 0]
+    if remaining:
+        cycle_keys = [i["source_key"] for i in remaining]
+        print(
+            f"[transform_rest] Warning: {len(remaining)} issue(s) appear to be in a "
+            f"parent cycle and will be created without a parent link: {cycle_keys}"
+        )
+        ordered.extend(remaining)
+
+    return ordered
+
+
 def transform_issues_rest(
     raw_issues: List[Dict[str, Any]],
     comments_by_key: Dict[str, List[Dict[str, Any]]],
@@ -256,10 +374,9 @@ def transform_issues_rest(
     cfg: MigrationConfig,
 ) -> List[Dict[str, Any]]:
     """
-    Transform all raw issues into Strategy B payloads.
-
-    Returns two groups in order: non-subtasks first, then subtasks.
-    This ensures parents always exist before their children are created.
+    Transform all raw issues into Strategy B payloads, topologically sorted
+    so every parent is created before its children regardless of issue type
+    or original creation order.
     """
     transformed: List[Dict[str, Any]] = []
     errors = 0
@@ -281,10 +398,9 @@ def transform_issues_rest(
     if errors:
         print(f"[transform_rest] {errors} issue(s) skipped.")
 
-    # Sort: parents before subtasks so write_rest.py can resolve parent keys.
-    parents = [i for i in transformed if not i["is_subtask"]]
-    subtasks = [i for i in transformed if i["is_subtask"]]
-    ordered = parents + subtasks
+    ordered = _topological_sort(transformed)
 
-    print(f"[transform_rest] {len(parents)} issues, {len(subtasks)} subtasks ready.")
+    children_count = sum(1 for i in ordered if i.get("source_parent_key"))
+    roots_count = len(ordered) - children_count
+    print(f"[transform_rest] {len(ordered)} issues ready ({roots_count} roots, {children_count} children).")
     return ordered
