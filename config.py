@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 # Optional YAML support — only required if you use config.yaml
 try:
@@ -55,6 +55,19 @@ class MigrationConfig:
 
     # Maximum issues to fetch per API page (Jira max is 100).
     page_size: int = 100
+
+    # Strategy B: explicit issue-type name mapping from Workspace A → Workspace B.
+    # e.g. {"Story": "Task", "Epic": "Task"}
+    # Types not listed here are passed through unchanged.
+    issue_type_map: Dict[str, str] = field(default_factory=dict)
+
+    # Strategy B: fallback issue type when a type from Workspace A doesn't exist
+    # in Workspace B and has no entry in issue_type_map.
+    fallback_issue_type: str = "Task"
+
+    # The Jira custom field ID used for "Start date" in Workspace A.
+    # Most Jira Cloud projects use customfield_10015; change if yours differs.
+    start_date_field: str = "customfield_10015"
 
 
 def _require(value: Optional[str], name: str) -> str:
@@ -123,6 +136,10 @@ def load_config() -> MigrationConfig:
             "Must be one of: extra_columns, append_description, both."
         )
 
+    # issue_type_map is only loadable from config.yaml (not practical as env var).
+    raw_type_map = yaml_data.get("migration", {}).get("issue_type_map") or {}
+    issue_type_map = {str(k): str(v) for k, v in raw_type_map.items()} if isinstance(raw_type_map, dict) else {}
+
     return MigrationConfig(
         jira_a=jira_a,
         jira_b=jira_b,
@@ -133,4 +150,11 @@ def load_config() -> MigrationConfig:
         ),
         output_dir=_get("OUTPUT_DIR", "migration", "output_dir", default="output"),
         page_size=int(_get("PAGE_SIZE", "migration", "page_size", default="100")),
+        issue_type_map=issue_type_map,
+        fallback_issue_type=_get(
+            "FALLBACK_ISSUE_TYPE", "migration", "fallback_issue_type", default="Task"
+        ),
+        start_date_field=_get(
+            "START_DATE_FIELD", "migration", "start_date_field", default="customfield_10015"
+        ),
     )

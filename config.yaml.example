@@ -32,3 +32,19 @@ migration:
 
   # Issues per API page (Jira Cloud max is 100).
   page_size: 100
+
+  # Strategy B: map issue type names from Workspace A → Workspace B.
+  # Only needed when the two sites use different type names.
+  # Types not listed here are matched case-insensitively; unmatched types
+  # fall back to fallback_issue_type.
+  # issue_type_map:
+  #   Story: Task
+  #   Epic: Epic
+
+  # Strategy B: issue type to use when no match is found in Workspace B.
+  fallback_issue_type: Task
+
+  # Custom field ID used for "Start date" in Workspace A.
+  # Most Jira Cloud projects use customfield_10015.  Check your field IDs at:
+  #   Jira settings → Issues → Custom fields
+  # start_date_field: customfield_10015
