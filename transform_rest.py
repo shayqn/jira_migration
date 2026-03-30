@@ -146,6 +146,13 @@ def _user_legacy_id(obj: Any) -> str:
     return obj.get("emailAddress") or obj.get("displayName") or obj.get("accountId") or ""
 
 
+def _user_display_name(obj: Any) -> str:
+    """Return the most human-readable identity for a user object."""
+    if not isinstance(obj, dict):
+        return ""
+    return obj.get("displayName") or obj.get("emailAddress") or obj.get("accountId") or ""
+
+
 def _resolve_user(
     user_obj: Any,
     mapping: Dict[str, str],
@@ -258,6 +265,11 @@ def transform_issue_rest(
     reporter_email, reporter_legacy = _resolve_user(reporter_obj, mapping, cfg.unmapped_user_placeholder)
     assignee_email, assignee_legacy = _resolve_user(assignee_obj, mapping, cfg.unmapped_user_placeholder)
 
+    # For the description block, show display name for mapped users and the
+    # legacy identity (email/name) for unmapped users.
+    reporter_display = reporter_legacy or _user_display_name(reporter_obj)
+    assignee_display = assignee_legacy or _user_display_name(assignee_obj)
+
     # -- Description (ADF passthrough) ---------------------------------------
     description: Any = fields.get("description")
     if not isinstance(description, dict):
@@ -268,13 +280,10 @@ def transform_issue_rest(
     # Prepend source issue key so it's always visible in Workspace B.
     description = _prepend_to_doc(description, _italic_paragraph(f"Migrated from: {source_key}"))
 
-    # For Strategy B (REST) there are no "extra columns" — the only way to
-    # preserve unmapped-user identity is in the description.  Always append
-    # the legacy block when there are unmapped users, regardless of
-    # legacy_info_strategy.
-    has_legacy = bool(reporter_legacy or assignee_legacy)
-    if has_legacy:
-        description = _append_legacy_block_adf(description, reporter_legacy, assignee_legacy)
+    # Always append original reporter/assignee so provenance is never lost,
+    # whether or not the user was successfully mapped to Workspace B.
+    if reporter_display or assignee_display:
+        description = _append_legacy_block_adf(description, reporter_display, assignee_display)
 
     # -- Date fields ---------------------------------------------------------
     due_date: Any = fields.get("duedate") or None
