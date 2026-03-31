@@ -11,9 +11,9 @@ Two strategies are supported:
 | Strategy | How | Best for |
 |---|---|---|
 | **A – CSV** | Exports issues to a CSV file for manual import via Jira's built-in CSV importer | Quick migrations, no dest credentials needed |
-| **B – REST** | Creates issues, comments, and transitions directly in Workspace B via the REST API | Full fidelity: ADF rich text, comments, statuses, dates |
+| **B – REST** | Creates issues, comments, and transitions directly in Workspace B via the REST API | Full fidelity: ADF rich text, comments, statuses, dates, sprints |
 
-Both strategies extract from Workspace A, apply a user mapping, and preserve the identity of unmapped users in the issue description.
+Both strategies extract from Workspace A, apply a user mapping, and preserve the original reporter/assignee identity in the issue description.
 
 ---
 
@@ -31,10 +31,12 @@ Both strategies extract from Workspace A, apply a user mapping, and preserve the
 | Start date | ✅ | ✅ |
 | Labels | ✅ | ✅ |
 | Components | ✅ | ✅ |
-| Parent key (subtasks) | ✅ | ✅ parents created first |
+| Parent / child hierarchy | ✅ | ✅ topologically sorted (any depth) |
+| Sprints | ❌ | ✅ created in dest board if missing |
 | Comments | ❌ | ✅ with original author + date header |
+| Attachments | ❌ | ❌ replaced with `[Attachment not migrated]` placeholder |
 | Source issue key | ✅ `IssueKey` column | ✅ prepended to description |
-| Unmapped user identity | ✅ extra columns or appended to description | ✅ appended to description |
+| Original reporter / assignee | ✅ extra columns or appended to description | ✅ always appended to description |
 
 ---
 
@@ -96,25 +98,34 @@ cp config.yaml.example config.yaml
 | `jira_b.base_url` | `JIRA_B_BASE_URL` | — | Destination workspace URL |
 | `jira_b.email` | `JIRA_B_EMAIL` | — | Destination API token email |
 | `jira_b.api_token` | `JIRA_B_API_TOKEN` | — | Destination API token |
-| `migration.legacy_info_strategy` | `LEGACY_INFO_STRATEGY` | `extra_columns` | How to record unmapped users: `extra_columns`, `append_description`, or `both`. Strategy B always appends to description regardless. |
+| `migration.legacy_info_strategy` | `LEGACY_INFO_STRATEGY` | `extra_columns` | How to record unmapped users in Strategy A: `extra_columns`, `append_description`, or `both`. Strategy B always appends to description. |
 | `migration.unmapped_user_placeholder` | `UNMAPPED_USER_PLACEHOLDER` | `""` | Email to use for unmapped users in reporter/assignee fields. Leave blank to leave unassigned. |
 | `migration.output_dir` | `OUTPUT_DIR` | `output` | Directory for Strategy A CSV files |
 | `migration.page_size` | `PAGE_SIZE` | `100` | Issues per API page (Jira max: 100) |
 | `migration.issue_type_map` | _(YAML only)_ | `{}` | Map issue type names from Workspace A → B, e.g. `Story: Task` |
 | `migration.fallback_issue_type` | `FALLBACK_ISSUE_TYPE` | `Task` | Issue type to use when source type doesn't exist in Workspace B and has no mapping |
-| `migration.start_date_field` | `START_DATE_FIELD` | `customfield_10015` | Custom field ID for "Start date" in Workspace A |
+| `migration.start_date_field` | `START_DATE_FIELD` | `customfield_10015` | Custom field ID for "Start date" |
+| `migration.sprint_field` | `SPRINT_FIELD` | `customfield_10020` | Custom field ID for "Sprint" |
 
 ---
 
 ## User mapping
 
-Create `user_mapping.csv` (gitignored) to map source emails to destination emails:
+Create `user_mapping.csv` (gitignored) to map source users to destination emails. The file has three columns:
 
 ```csv
-source_email,target_email
-alice@oldco.com,alice@newco.com
-bob@oldco.com,bob@newco.com
+source_email,source_account_id,target_email
+alice@oldco.com,712020:abc123,alice@newco.com
+bob@oldco.com,,bob@newco.com
 ```
+
+- **`source_email`** — the user's email in Workspace A
+- **`source_account_id`** — the user's Jira accountId in Workspace A (optional but recommended)
+- **`target_email`** — the user's email in Workspace B
+
+Both `source_email` and `source_account_id` are indexed as lookup keys. This is important because Jira Cloud often omits `emailAddress` from API responses due to workspace privacy settings — in those cases the accountId fallback is the only reliable match.
+
+To find a user's accountId: navigate to their profile in Workspace A and copy the `accountId` query parameter from the URL.
 
 See `user_mapping.csv.example` for the format. Users not listed in the mapping are treated as unmapped — their original identity is preserved in the issue description.
 
@@ -161,22 +172,33 @@ The destination project must already exist in Workspace B before running.
 ## Before running Strategy B
 
 1. **Create the destination project** in Workspace B if it doesn't exist.
-2. **Configure the workflow** — the script transitions issues to their source status by name. If Workspace B's workflow uses different status names, either update the workflow to match, or issues will be left in the default status (a warning is printed).
-3. **Verify issue types** — the script fetches available types from the destination project and applies `issue_type_map` + `fallback_issue_type`. Check the startup output to confirm types are resolving correctly.
+2. **For Scrum projects: ensure an agile board exists** for the destination project. The script automatically finds the board, syncs existing sprints by name, and creates missing sprints. If no board is found, sprint assignment is skipped with a warning.
+3. **Configure the workflow** — the script transitions issues to their source status by name. If Workspace B's workflow uses different status names, either update the workflow to match, or issues will be left in the default status (a warning is printed).
+4. **Verify issue types** — the script fetches available types from the destination project and applies `issue_type_map` + `fallback_issue_type`. Check the startup output to confirm types are resolving correctly.
 
 ---
 
 ## Limitations and known behaviors
 
+**No resume capability.** If the migration is interrupted and restarted, all issues are created again from scratch, resulting in duplicates. If this happens, delete the destination project's issues and re-run.
+
 **Comments are always posted as the API token user.** Jira Cloud does not allow posting comments as another user via the REST API, regardless of permissions. Each comment is prepended with an italic header: _"Originally posted by [name] on [date]:"_
 
 **Source issue key is always preserved.** Each migrated issue has an italic _"Migrated from: PROJ1-42"_ line prepended to its description.
 
-**Unmapped users.** When a user in Workspace A has no entry in `user_mapping.csv`, the reporter/assignee field is left blank (or set to `unmapped_user_placeholder`), and their original identity is appended to the issue description.
+**Original reporter and assignee are always recorded.** Every migrated issue appends an italic block to the description showing the original reporter and assignee from Workspace A — whether or not they were successfully mapped to Workspace B. This preserves provenance even after user accounts change.
 
-**Jira Cloud hides email addresses.** The API often omits `emailAddress` from user objects due to workspace privacy settings. When an email is unavailable, the user's display name is used as their legacy identity.
+**Unmapped users.** When a user in Workspace A has no entry in `user_mapping.csv` (by email or accountId), the reporter/assignee field is left blank (or set to `unmapped_user_placeholder`). Their original identity is still recorded in the description.
 
-**Start date custom field ID may differ.** If your Workspace A uses a different custom field ID for Start date, set `start_date_field` in `config.yaml` or the `START_DATE_FIELD` env var. You can find your field IDs at **Jira settings → Issues → Custom fields**.
+**Attachments are not migrated.** Jira Cloud attachment IDs are workspace-specific and cannot be transferred via the API. Any inline images or file attachments embedded in descriptions or comments are replaced with an italic _"[Attachment not migrated]"_ placeholder so content structure is preserved.
+
+**Jira Cloud hides email addresses.** The API often omits `emailAddress` from user objects due to workspace privacy settings. The `source_account_id` column in `user_mapping.csv` provides a reliable fallback — populate it for users whose emails may be hidden.
+
+**Sprints: closed sprints cannot be fully replicated.** The script creates missing sprints and attempts to match their state (active/closed/future). However, Jira Cloud enforces constraints on sprint state transitions — a sprint cannot be re-opened once closed, and only one sprint can be active at a time. Sprint names and dates are preserved; final state may differ from the source.
+
+**Parent-child hierarchy is handled at any depth.** Issues are created in topological order (Epics before Stories, Stories before Tasks, Tasks before Subtasks) so parent links are always valid. This works regardless of issue type — it is not limited to formal Subtask types.
+
+**Custom field IDs may differ.** The Start date and Sprint field IDs (`customfield_10015`, `customfield_10020`) are standard for most Jira Cloud instances but can vary. If your fields aren't migrating, find your field IDs at **Jira settings → Issues → Custom fields** and update `start_date_field` / `sprint_field` in `config.yaml`.
 
 ---
 
