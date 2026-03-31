@@ -69,6 +69,10 @@ class MigrationConfig:
     # Most Jira Cloud projects use customfield_10015; change if yours differs.
     start_date_field: str = "customfield_10015"
 
+    # The Jira custom field ID used for "Sprint" in both workspaces.
+    # customfield_10020 is the Jira Cloud standard; change if yours differs.
+    sprint_field: str = "customfield_10020"
+
 
 def _require(value: Optional[str], name: str) -> str:
     if not value:
@@ -156,5 +160,8 @@ def load_config() -> MigrationConfig:
         ),
         start_date_field=_get(
             "START_DATE_FIELD", "migration", "start_date_field", default="customfield_10015"
+        ),
+        sprint_field=_get(
+            "SPRINT_FIELD", "migration", "sprint_field", default="customfield_10020"
         ),
     )

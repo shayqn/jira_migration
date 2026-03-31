@@ -285,6 +285,24 @@ def transform_issue_rest(
     if reporter_display or assignee_display:
         description = _append_legacy_block_adf(description, reporter_display, assignee_display)
 
+    # -- Sprint --------------------------------------------------------------
+    # customfield_10020 is an array of sprint objects; pick the active sprint
+    # if present, otherwise take the last one.
+    source_sprint: Optional[Dict[str, Any]] = None
+    sprint_field_val = fields.get(cfg.sprint_field)
+    if isinstance(sprint_field_val, list) and sprint_field_val:
+        active = [s for s in sprint_field_val if isinstance(s, dict) and s.get("state") == "active"]
+        sprint_obj = active[0] if active else sprint_field_val[-1]
+        if isinstance(sprint_obj, dict) and sprint_obj.get("name"):
+            source_sprint = {
+                "name":         sprint_obj.get("name"),
+                "state":        sprint_obj.get("state"),        # active / closed / future
+                "startDate":    sprint_obj.get("startDate"),
+                "endDate":      sprint_obj.get("endDate"),
+                "completeDate": sprint_obj.get("completeDate"),
+                "goal":         sprint_obj.get("goal") or "",
+            }
+
     # -- Date fields ---------------------------------------------------------
     due_date: Any = fields.get("duedate") or None
     start_date: Any = fields.get(cfg.start_date_field) or None
@@ -317,6 +335,7 @@ def transform_issue_rest(
         "source_status": source_status,
         "is_subtask": is_subtask,
         "fields": fields_payload,
+        "source_sprint": source_sprint,   # None if issue has no sprint
         "legacy_reporter": reporter_legacy,
         "legacy_assignee": assignee_legacy,
         "comments": [_transform_comment(c) for c in comments],

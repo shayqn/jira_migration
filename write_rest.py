@@ -144,6 +144,134 @@ class UserResolver:
 
 
 # ---------------------------------------------------------------------------
+# Sprint resolution
+# ---------------------------------------------------------------------------
+
+class SprintResolver:
+    """
+    Resolves sprint names → sprint IDs in Workspace B.
+
+    On first use it looks up the agile board for the destination project,
+    fetches existing sprints, and caches them by name.  Missing sprints are
+    created automatically with the same name, dates, and goal as the source.
+    Sprint state (active / closed / future) is replicated via a follow-up PUT.
+    """
+
+    def __init__(self, site: SiteConfig, dest_project_key: str) -> None:
+        self._site = site
+        self._dest_project_key = dest_project_key
+        self._board_id: Optional[int] = None
+        self._sprint_cache: Dict[str, int] = {}   # name → sprint_id in Workspace B
+        self._initialized = False
+        self._available = False   # False if no board found or init failed
+
+    def _ensure_init(self) -> bool:
+        if self._initialized:
+            return self._available
+        self._initialized = True
+
+        # Find the scrum/kanban board for the destination project.
+        url = f"{self._site.base_url}/rest/agile/1.0/board"
+        try:
+            data = _request("GET", url, self._site, params={"projectKeyOrId": self._dest_project_key})
+            boards = data.get("values") or []
+            if not boards:
+                print(
+                    f"[write_rest] Warning: no agile board found for project "
+                    f"'{self._dest_project_key}' — sprint migration skipped.",
+                    file=sys.stderr,
+                )
+                return False
+            self._board_id = boards[0]["id"]
+            print(f"[write_rest] Sprint board: id={self._board_id} "
+                  f"name='{boards[0].get('name')}' for project '{self._dest_project_key}'.")
+        except Exception as exc:
+            print(f"[write_rest] Warning: could not find agile board: {exc} — "
+                  f"sprint migration skipped.", file=sys.stderr)
+            return False
+
+        # Cache all sprints that already exist on this board.
+        sprint_url = f"{self._site.base_url}/rest/agile/1.0/board/{self._board_id}/sprint"
+        start_at = 0
+        while True:
+            try:
+                page = _request("GET", sprint_url, self._site,
+                                params={"startAt": start_at, "maxResults": 50})
+                for s in page.get("values") or []:
+                    if s.get("name") and s.get("id"):
+                        self._sprint_cache[s["name"]] = s["id"]
+                if page.get("isLast", True):
+                    break
+                start_at += len(page.get("values") or [])
+            except Exception as exc:
+                print(f"[write_rest] Warning: could not fetch existing sprints: {exc}",
+                      file=sys.stderr)
+                break
+
+        if self._sprint_cache:
+            print(f"[write_rest] Found {len(self._sprint_cache)} existing sprint(s) "
+                  f"in destination board.")
+        self._available = True
+        return True
+
+    def resolve(self, sprint_name: str, sprint_data: Dict[str, Any]) -> Optional[int]:
+        """Return the Workspace B sprint ID for *sprint_name*, creating it if needed."""
+        if not self._ensure_init():
+            return None
+        if sprint_name in self._sprint_cache:
+            return self._sprint_cache[sprint_name]
+        return self._create_sprint(sprint_name, sprint_data)
+
+    def _create_sprint(self, sprint_name: str, sprint_data: Dict[str, Any]) -> Optional[int]:
+        url = f"{self._site.base_url}/rest/agile/1.0/sprint"
+        body: Dict[str, Any] = {"name": sprint_name, "originBoardId": self._board_id}
+        if sprint_data.get("startDate"):
+            body["startDate"] = sprint_data["startDate"]
+        if sprint_data.get("endDate"):
+            body["endDate"] = sprint_data["endDate"]
+        if sprint_data.get("goal"):
+            body["goal"] = sprint_data["goal"]
+        try:
+            result = _request("POST", url, self._site, json=body)
+            sprint_id = result.get("id")
+            if not sprint_id:
+                return None
+            self._sprint_cache[sprint_name] = sprint_id
+            print(f"[write_rest] Created sprint '{sprint_name}' (id={sprint_id}).")
+
+            # Replicate sprint state.
+            state = sprint_data.get("state")
+            if state in ("active", "closed"):
+                self._transition_sprint(sprint_id, state, sprint_data)
+
+            return sprint_id
+        except Exception as exc:
+            print(f"[write_rest] Warning: could not create sprint '{sprint_name}': {exc}",
+                  file=sys.stderr)
+            return None
+
+    def _transition_sprint(
+        self, sprint_id: int, state: str, sprint_data: Dict[str, Any]
+    ) -> None:
+        url = f"{self._site.base_url}/rest/agile/1.0/sprint/{sprint_id}"
+        body: Dict[str, Any] = {"state": state}
+        if sprint_data.get("startDate"):
+            body["startDate"] = sprint_data["startDate"]
+        if state == "closed" and sprint_data.get("completeDate"):
+            body["completeDate"] = sprint_data["completeDate"]
+        elif sprint_data.get("endDate"):
+            body["endDate"] = sprint_data["endDate"]
+        try:
+            _request("PUT", url, self._site, json=body)
+        except Exception as exc:
+            print(
+                f"[write_rest] Warning: could not transition sprint {sprint_id} "
+                f"to '{state}': {exc}",
+                file=sys.stderr,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Issue creation
 # ---------------------------------------------------------------------------
 
@@ -171,6 +299,7 @@ def _build_issue_payload(
     resolver: UserResolver,
     available_types: Dict[str, str],
     cfg: MigrationConfig,
+    sprint_resolver: Optional["SprintResolver"] = None,
 ) -> Dict[str, Any]:
     """
     Build the final POST /rest/api/3/issue payload for *item*.
@@ -199,6 +328,13 @@ def _build_issue_payload(
                 f"for subtask '{item['source_key']}' — parent field omitted.",
                 file=sys.stderr,
             )
+
+    # Resolve sprint.
+    source_sprint = item.get("source_sprint")
+    if source_sprint and sprint_resolver:
+        sprint_id = sprint_resolver.resolve(source_sprint["name"], source_sprint)
+        if sprint_id:
+            fields[cfg.sprint_field] = sprint_id
 
     # Resolve user fields.
     fields = _resolve_user_fields(fields, resolver)
@@ -350,6 +486,7 @@ def write_issues_rest(
           f"{', '.join(sorted(available_types.values()))}")
 
     resolver = UserResolver(site_b)
+    sprint_resolver = SprintResolver(site_b, dest_project_key)
     key_map: Dict[str, str] = {}   # source_key → dest_key
     issues_created = 0
     comments_posted = 0
@@ -363,7 +500,7 @@ def write_issues_rest(
     for idx, item in enumerate(transformed_issues, start=1):
         source_key = item["source_key"]
         try:
-            payload = _build_issue_payload(item, dest_project_key, key_map, resolver, available_types, cfg)
+            payload = _build_issue_payload(item, dest_project_key, key_map, resolver, available_types, cfg, sprint_resolver)
             dest_key = _create_issue(site_b, payload)
             key_map[source_key] = dest_key
             issues_created += 1
