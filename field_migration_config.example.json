@@ -1,0 +1,64 @@
+{
+  "_comment": "Field migration config for migrate_custom_fields.py. Copy this file, fill in your values, and pass it with --config yourfile.json",
+
+  "dest_project": "DESTPROJ",
+
+  "fields": [
+    {
+      "_comment": "NUMBER field — copied directly from source to destination",
+      "name": "Story point actual",
+      "type": "number",
+      "source_field": "customfield_10679",
+      "dest_field": "customfield_10169"
+    },
+    {
+      "_comment": "PEOPLE field — accountIds resolved via user_mapping.csv. Unmapped users appended to description.",
+      "name": "Collaborators",
+      "type": "people",
+      "source_field": "customfield_10778",
+      "dest_field": "customfield_10168"
+    },
+    {
+      "_comment": "ADF field — no matching field in Workspace B, so content is appended to the issue description under a heading.",
+      "name": "Deliverables",
+      "type": "adf_append",
+      "source_field": "customfield_10712",
+      "dest_field": null
+    },
+    {
+      "_comment": "TEXT field — plain text, copied directly (single-line or paragraph stored as plain string, not ADF).",
+      "name": "My Text Field",
+      "type": "text",
+      "source_field": "customfield_XXXXX",
+      "dest_field": "customfield_YYYYY"
+    },
+    {
+      "_comment": "SELECT field — single select option, e.g. a dropdown. Value is copied by name.",
+      "name": "My Dropdown Field",
+      "type": "select",
+      "source_field": "customfield_XXXXX",
+      "dest_field": "customfield_YYYYY"
+    },
+    {
+      "_comment": "DATE field — plain date string (YYYY-MM-DD), copied directly.",
+      "name": "My Date Field",
+      "type": "date",
+      "source_field": "customfield_XXXXX",
+      "dest_field": "customfield_YYYYY"
+    },
+    {
+      "_comment": "URL field — plain string, copied directly.",
+      "name": "My URL Field",
+      "type": "url",
+      "source_field": "customfield_XXXXX",
+      "dest_field": "customfield_YYYYY"
+    },
+    {
+      "_comment": "ADF field — rich text (Paragraph type). Requires a matching field in Workspace B. If no matching field exists, use adf_append instead.",
+      "name": "My Rich Text Field",
+      "type": "adf",
+      "source_field": "customfield_XXXXX",
+      "dest_field": "customfield_YYYYY"
+    }
+  ]
+}
