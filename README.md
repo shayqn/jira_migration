@@ -34,7 +34,7 @@ Both strategies extract from Workspace A, apply a user mapping, and preserve the
 | Parent / child hierarchy | ✅ | ✅ topologically sorted (any depth) |
 | Sprints | ❌ | ✅ created in dest board if missing |
 | Comments | ❌ | ✅ with original author + date header |
-| Attachments | ❌ | ❌ replaced with `[Attachment not migrated]` placeholder |
+| Attachments | ❌ | ⚠️ issue-level via `migrate_attachments.py`; inline ADF media not transferable |
 | Source issue key | ✅ `IssueKey` column | ✅ prepended to description |
 | Original reporter / assignee | ✅ extra columns or appended to description | ✅ always appended to description |
 
@@ -190,7 +190,7 @@ The destination project must already exist in Workspace B before running.
 
 **Unmapped users.** When a user in Workspace A has no entry in `user_mapping.csv` (by email or accountId), the reporter/assignee field is left blank (or set to `unmapped_user_placeholder`). Their original identity is still recorded in the description.
 
-**Attachments are not migrated.** Jira Cloud attachment IDs are workspace-specific and cannot be transferred via the API. Any inline images or file attachments embedded in descriptions or comments are replaced with an italic _"[Attachment not migrated]"_ placeholder so content structure is preserved.
+**Attachments at the issue level can be migrated separately.** Issue-level file attachments (including images pasted into comments, which Jira also attaches at the issue level) can be migrated using `migrate_attachments.py` after the main migration completes. However, inline images embedded inside ADF description or comment bodies via Jira's media service are workspace-specific and cannot be transferred — those are replaced with an italic _"[Attachment not migrated]"_ placeholder.
 
 **Jira Cloud hides email addresses.** The API often omits `emailAddress` from user objects due to workspace privacy settings. The `source_account_id` column in `user_mapping.csv` provides a reliable fallback — populate it for users whose emails may be hidden.
 
@@ -202,21 +202,133 @@ The destination project must already exist in Workspace B before running.
 
 ---
 
+## Post-migration utilities
+
+These standalone scripts run independently of `migrate_project.py` and are designed for use after the main migration completes. Each uses only the environment variables it needs.
+
+### `download_attachments.py` — download attachments from Workspace A
+
+Downloads issue-level attachments from Workspace A to a local directory. Useful for backup or as input to `migrate_attachments.py`.
+
+```bash
+# Download attachments for a single issue
+python download_attachments.py --issue-key PROJ-123 --dir ./attachments
+
+# Download all attachments for a project
+python download_attachments.py --project PROJ --dir ./attachments
+```
+
+Requires: `JIRA_A_BASE_URL`, `JIRA_A_EMAIL`, `JIRA_A_API_TOKEN`
+
+Files are saved to `<dir>/<issue-key>/<filename>`. Existing files are skipped.
+
+---
+
+### `migrate_attachments.py` — copy attachments from Workspace A → B
+
+Iterates over issues in Workspace B, reads the _"Migrated from: XXXX-NNN"_ sentinel in each description to identify the source issue key, downloads attachments from Workspace A (caching them in `/tmp/jira_attachment_cache`), and uploads them to the corresponding Workspace B issue. Skips attachments that already exist by filename.
+
+```bash
+python migrate_attachments.py --project PROJ
+```
+
+Requires: `JIRA_A_BASE_URL`, `JIRA_A_EMAIL`, `JIRA_A_API_TOKEN`, `JIRA_B_BASE_URL`, `JIRA_B_EMAIL`, `JIRA_B_API_TOKEN`
+
+Note: only issue-level attachments are migrated. Inline media embedded in ADF descriptions/comments cannot be transferred between workspaces.
+
+---
+
+### `backfill_user.py` — fix reporter/assignee for a specific unmapped user
+
+If a user was not in `user_mapping.csv` during the original migration, their reporter/assignee fields will be blank. This script scans migrated issues for _"Original reporter: NAME"_ / _"Original assignee: NAME"_ in the description, resolves the target email to a Workspace B accountId, and updates the fields.
+
+```bash
+# Dry run (shows what would change)
+python backfill_user.py --display-name "Erik MacLennan" --email erik@newco.com --project PROJ --dry-run
+
+# Apply changes
+python backfill_user.py --display-name "Erik MacLennan" --email erik@newco.com --project PROJ
+```
+
+Requires: `JIRA_B_BASE_URL`, `JIRA_B_EMAIL`, `JIRA_B_API_TOKEN` only (does not need Workspace A credentials).
+
+---
+
+### `migrate_deliverables.py` — migrate a Deliverables custom field to descriptions
+
+Reads the `Deliverables` rich-text custom field (`customfield_10712`) from Workspace A issues and appends its content to the corresponding Workspace B issue descriptions. Uses a sentinel heading to avoid duplicate appends.
+
+```bash
+python migrate_deliverables.py --project PROJ
+```
+
+Requires: `JIRA_A_BASE_URL`, `JIRA_A_EMAIL`, `JIRA_A_API_TOKEN`, `JIRA_B_BASE_URL`, `JIRA_B_EMAIL`, `JIRA_B_API_TOKEN`
+
+---
+
+### `migrate_custom_fields.py` — migrate arbitrary custom fields via a JSON config
+
+A config-driven script for migrating any set of custom fields from Workspace A to Workspace B. Each project has its own JSON config file that lists the source field ID, destination field ID, and field type for each field to migrate.
+
+```bash
+python migrate_custom_fields.py --config field_migration_config.HEG.json
+```
+
+Requires: `JIRA_A_BASE_URL`, `JIRA_A_EMAIL`, `JIRA_A_API_TOKEN`, `JIRA_B_BASE_URL`, `JIRA_B_EMAIL`, `JIRA_B_API_TOKEN`
+
+**Supported field types:**
+
+| Type | Behavior |
+|---|---|
+| `number` | Copies numeric value directly |
+| `text` | Copies plain text value directly |
+| `date` | Copies date string directly |
+| `url` | Copies URL value directly |
+| `select` | Copies the option value label |
+| `adf` | Copies full ADF rich-text content to dest field |
+| `adf_append` | Appends ADF content to the destination description with a sentinel heading |
+| `people` | Resolves source accountId → email via `user_mapping.csv` → Workspace B accountId |
+
+Fields are skipped if the destination field is already populated. If a `dest_field` is `null` or the type is `adf_append`, the content is appended to the description instead.
+
+**Config file format** (`field_migration_config.example.json` has a full template):
+
+```json
+{
+  "dest_project": "PROJKEY",
+  "fields": [
+    { "name": "Story points actual", "type": "number",  "source_field": "customfield_10016", "dest_field": "customfield_10028" },
+    { "name": "Collaborators",       "type": "people",  "source_field": "customfield_10100", "dest_field": "customfield_10200" },
+    { "name": "Notes",               "type": "adf",     "source_field": "customfield_10300", "dest_field": "customfield_10400" }
+  ]
+}
+```
+
+---
+
 ## File structure
 
 ```
 jira_migration/
-├── migrate_project.py      # CLI entry point
-├── config.py               # Config loading (env vars + YAML)
-├── config.yaml.example     # Config template (copy to config.yaml)
-├── extract.py              # Fetch issues and comments from Workspace A
-├── transform.py            # Strategy A: raw issues → CSV row dicts
-├── write_csv.py            # Strategy A: write CSV file
-├── transform_rest.py       # Strategy B: raw issues → REST API payloads
-├── write_rest.py           # Strategy B: create issues/comments in Workspace B
-├── adf_utils.py            # ADF → plain text conversion (Strategy A)
-├── user_mapping.py         # Load and apply user_mapping.csv
+├── migrate_project.py              # CLI entry point (Strategy A & B)
+├── config.py                       # Config loading (env vars + YAML)
+├── config.yaml.example             # Config template (copy to config.yaml)
+├── extract.py                      # Fetch issues and comments from Workspace A
+├── transform.py                    # Strategy A: raw issues → CSV row dicts
+├── write_csv.py                    # Strategy A: write CSV file
+├── transform_rest.py               # Strategy B: raw issues → REST API payloads
+├── write_rest.py                   # Strategy B: create issues/comments in Workspace B
+├── adf_utils.py                    # ADF → plain text conversion (Strategy A)
+├── user_mapping.py                 # Load and apply user_mapping.csv
+│
+├── download_attachments.py         # Download issue attachments from Workspace A
+├── migrate_attachments.py          # Copy attachments from Workspace A → B
+├── backfill_user.py                # Fix reporter/assignee for a missed unmapped user
+├── migrate_deliverables.py         # Migrate Deliverables custom field to descriptions
+├── migrate_custom_fields.py        # Config-driven migration of arbitrary custom fields
+├── field_migration_config.example.json   # Template for custom field config
+│
 ├── user_mapping.csv.example
 ├── requirements.txt
-└── output/                 # Generated CSV files (gitignored)
+└── output/                         # Generated CSV files (gitignored)
 ```
